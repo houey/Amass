@@ -1,4 +1,4 @@
-// Copyright 2017 Jeff Foley. All rights reserved.
+// Copyright 2017-2021 Jeff Foley. All rights reserved.
 // Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 
 package main
@@ -7,13 +7,15 @@ import (
 	"bytes"
 	"flag"
 	"fmt"
+	"io/ioutil"
 	"math/rand"
 	"os"
 	"time"
 
-	"github.com/OWASP/Amass/amass/core"
-	"github.com/OWASP/Amass/amass/handlers"
-	"github.com/OWASP/Amass/amass/utils"
+	"github.com/OWASP/Amass/v3/config"
+	"github.com/OWASP/Amass/v3/graph"
+	"github.com/OWASP/Amass/v3/requests"
+	"github.com/caffix/stringset"
 	"github.com/fatih/color"
 )
 
@@ -23,11 +25,13 @@ const (
 )
 
 type trackArgs struct {
-	Domains utils.ParseStrings
+	Domains stringset.Set
 	Last    int
 	Since   string
 	Options struct {
 		History bool
+		NoColor bool
+		Silent  bool
 	}
 	Filepaths struct {
 		ConfigFile string
@@ -39,7 +43,9 @@ type trackArgs struct {
 func runTrackCommand(clArgs []string) {
 	var args trackArgs
 	var help1, help2 bool
-	trackCommand := flag.NewFlagSet("track", flag.ExitOnError)
+	trackCommand := flag.NewFlagSet("track", flag.ContinueOnError)
+
+	args.Domains = stringset.New()
 
 	trackBuf := new(bytes.Buffer)
 	trackCommand.SetOutput(trackBuf)
@@ -50,6 +56,8 @@ func runTrackCommand(clArgs []string) {
 	trackCommand.IntVar(&args.Last, "last", 0, "The number of recent enumerations to include in the tracking")
 	trackCommand.StringVar(&args.Since, "since", "", "Exclude all enumerations before (format: "+timeFormat+")")
 	trackCommand.BoolVar(&args.Options.History, "history", false, "Show the difference between all enumeration pairs")
+	trackCommand.BoolVar(&args.Options.NoColor, "nocolor", false, "Disable colorized output")
+	trackCommand.BoolVar(&args.Options.Silent, "silent", false, "Disable all output during execution")
 	trackCommand.StringVar(&args.Filepaths.ConfigFile, "config", "", "Path to the INI configuration file. Additional details below")
 	trackCommand.StringVar(&args.Filepaths.Directory, "dir", "", "Path to the directory containing the graph database")
 	trackCommand.StringVar(&args.Filepaths.Domains, "df", "", "Path to a file providing root domain names")
@@ -68,6 +76,14 @@ func runTrackCommand(clArgs []string) {
 		return
 	}
 
+	if args.Options.NoColor {
+		color.NoColor = true
+	}
+	if args.Options.Silent {
+		color.Output = ioutil.Discard
+		color.Error = ioutil.Discard
+	}
+
 	// Some input validation
 	if args.Since != "" && args.Last != 0 {
 		r.Fprintln(color.Error, "The since flag cannot be used with the last or all flags")
@@ -78,12 +94,12 @@ func runTrackCommand(clArgs []string) {
 		os.Exit(1)
 	}
 	if args.Filepaths.Domains != "" {
-		list, err := core.GetListFromFile(args.Filepaths.Domains)
+		list, err := config.GetListFromFile(args.Filepaths.Domains)
 		if err != nil {
 			r.Fprintf(color.Error, "Failed to parse the domain names file: %v\n", err)
 			os.Exit(1)
 		}
-		args.Domains = utils.UniqueAppend(args.Domains, list...)
+		args.Domains.InsertMany(list...)
 	}
 	if len(args.Domains) == 0 {
 		r.Fprintln(color.Error, "No root domain names were provided")
@@ -102,79 +118,105 @@ func runTrackCommand(clArgs []string) {
 
 	rand.Seed(time.Now().UTC().UnixNano())
 
-	config := new(core.Config)
+	cfg := config.NewConfig()
 	// Check if a configuration file was provided, and if so, load the settings
-	if acquireConfig(args.Filepaths.Directory, args.Filepaths.ConfigFile, config) {
+	if err := config.AcquireConfig(args.Filepaths.Directory, args.Filepaths.ConfigFile, cfg); err == nil {
 		if args.Filepaths.Directory == "" {
-			args.Filepaths.Directory = config.Dir
+			args.Filepaths.Directory = cfg.Dir
 		}
 		if len(args.Domains) == 0 {
-			args.Domains = utils.UniqueAppend(args.Domains, config.Domains()...)
+			args.Domains.InsertMany(cfg.Domains()...)
 		}
+	} else if args.Filepaths.ConfigFile != "" {
+		r.Fprintf(color.Error, "Failed to load the configuration file: %v\n", err)
+		os.Exit(1)
 	}
 
 	// Connect with the graph database containing the enumeration data
-	db := openGraphDatabase(args.Filepaths.Directory, config)
+	db := openGraphDatabase(args.Filepaths.Directory, cfg)
 	if db == nil {
 		r.Fprintln(color.Error, "Failed to connect with the database")
 		os.Exit(1)
 	}
 	defer db.Close()
 
-	// Obtain the enumerations that include the provided domain(s)
-	enums := enumIDs(args.Domains, db)
-
-	// There needs to be at least two enumerations to proceed
-	if len(enums) < 2 {
-		r.Fprintln(color.Error, "Tracking requires more than one enumeration")
+	// Create the in-memory graph database
+	memDB, err := memGraphForScope(args.Domains.Slice(), db)
+	if err != nil {
+		r.Fprintln(color.Error, err.Error())
 		os.Exit(1)
 	}
-	// The default is to use all the enumerations available
-	if args.Last == 0 {
-		args.Last = len(enums)
+
+	// Get all the UUIDs for events that have information in scope
+	uuids := eventUUIDs(args.Domains.Slice(), memDB)
+	if len(uuids) == 0 {
+		r.Fprintln(color.Error, "Failed to find the domains of interest in the database")
+		os.Exit(1)
 	}
 
-	var end int
-	enums, earliest, latest := orderedEnumsAndDateRanges(enums, db)
+	var earliest, latest []time.Time
+	// Put the events in chronological order
+	uuids, earliest, latest = orderedEvents(uuids, memDB)
+	if len(uuids) == 0 {
+		r.Fprintln(color.Error, "Failed to sort the events")
+		os.Exit(1)
+	}
+
+	// The default is to use all the enumerations available
+	if args.Last == 0 {
+		args.Last = len(uuids)
+	}
+
+	var begin int
 	// Filter out enumerations that begin before the start date/time
 	if args.Since != "" {
-		for i := len(enums)-1; i >= 0; i-- {
-			if !earliest[i].Before(start) {
+		for i := len(uuids) - 1; i >= 0; i-- {
+			if earliest[i].Before(start) {
 				break
 			}
-			end++
+			begin++
 		}
 	} else { // Or the number of enumerations from the end of the timeline
-		if args.Last > len(enums) {
+		if args.Last > len(uuids) {
 			r.Fprintf(color.Error, "%d enumerations are not available\n", args.Last)
 			os.Exit(1)
 		}
 
-		end = args.Last
+		begin = args.Last
 	}
-	enums = enums[:end]
-	earliest = earliest[:end]
-	latest = latest[:end]
+	begin = len(uuids) - begin
+	uuids = uuids[begin:]
+	earliest = earliest[begin:]
+	latest = latest[begin:]
 
-	if args.Options.History {
-		completeHistoryOutput(args.Domains, enums, earliest, latest, db)
+	cache := cacheWithData()
+	if len(uuids) == 1 {
+		printOneEvent(uuids, args.Domains.Slice(), earliest[0], latest[0], memDB, cache)
+		return
+	} else if args.Options.History {
+		completeHistoryOutput(uuids, args.Domains.Slice(), earliest, latest, memDB, cache)
 		return
 	}
-	cumulativeOutput(args.Domains, enums, earliest, latest, db)
+	cumulativeOutput(uuids, args.Domains.Slice(), earliest, latest, memDB, cache)
 }
 
-func cumulativeOutput(domains []string, enums []string, ea, la []time.Time, db handlers.DataHandler) {
-	idx := len(enums) - 1
-	filter := utils.NewStringFilter()
+func printOneEvent(uuid, domains []string, earliest, latest time.Time, db *graph.Graph, cache *requests.ASNCache) {
+	one := getScopedOutput(uuid, domains, db, cache)
 
-	var cum []*core.Output
-	for i := idx - 1; i >= 0; i-- {
-		for _, out := range getUniqueDBOutput(enums[i], domains, db) {
-			if domainNameInScope(out.Name, domains) && !filter.Duplicate(out.Name) {
-				cum = append(cum, out)
-			}
-		}
+	blueLine()
+	fmt.Fprintf(color.Output, "%s\t%s%s%s\n%s\t%s%s%s\n", blue("Between"),
+		yellow(earliest.Format(timeFormat)), blue(" -> "), yellow(latest.Format(timeFormat)),
+		blue("and"), yellow(earliest.Format(timeFormat)), blue(" -> "), yellow(latest.Format(timeFormat)))
+	blueLine()
+
+	for _, d := range diffEnumOutput([]*requests.Output{}, one) {
+		fmt.Fprintln(color.Output, d)
 	}
+}
+
+func cumulativeOutput(uuids, domains []string, ea, la []time.Time, db *graph.Graph, cache *requests.ASNCache) {
+	idx := len(uuids) - 1
+	cum := getScopedOutput(uuids[:idx], domains, db, cache)
 
 	blueLine()
 	fmt.Fprintf(color.Output, "%s\t%s%s%s\n%s\t%s%s%s\n", blue("Between"),
@@ -183,7 +225,7 @@ func cumulativeOutput(domains []string, enums []string, ea, la []time.Time, db h
 	blueLine()
 
 	var updates bool
-	out := getUniqueDBOutput(enums[idx], domains, db)
+	out := getScopedOutput([]string{uuids[idx]}, domains, db, cache)
 	for _, d := range diffEnumOutput(cum, out) {
 		updates = true
 		fmt.Fprintln(color.Output, d)
@@ -193,12 +235,26 @@ func cumulativeOutput(domains []string, enums []string, ea, la []time.Time, db h
 	}
 }
 
-func completeHistoryOutput(domains []string, enums []string, ea, la []time.Time, db handlers.DataHandler) {
+func getScopedOutput(uuids, domains []string, db *graph.Graph, cache *requests.ASNCache) []*requests.Output {
+	var output []*requests.Output
+
+	for _, out := range getEventOutput(uuids, false, db, cache) {
+		if len(domains) > 0 && !domainNameInScope(out.Name, domains) {
+			continue
+		}
+
+		output = append(output, out)
+	}
+
+	return output
+}
+
+func completeHistoryOutput(uuids, domains []string, ea, la []time.Time, db *graph.Graph, cache *requests.ASNCache) {
 	var prev string
 
-	for i, enum := range enums {
+	for i, uuid := range uuids {
 		if prev == "" {
-			prev = enum
+			prev = uuid
 			continue
 		}
 		if i != 1 {
@@ -212,8 +268,8 @@ func completeHistoryOutput(domains []string, enums []string, ea, la []time.Time,
 		blueLine()
 
 		var updates bool
-		out1 := getUniqueDBOutput(prev, domains, db)
-		out2 := getUniqueDBOutput(enum, domains, db)
+		out1 := getScopedOutput([]string{prev}, domains, db, cache)
+		out2 := getScopedOutput([]string{uuid}, domains, db, cache)
 		for _, d := range diffEnumOutput(out1, out2) {
 			updates = true
 			fmt.Fprintln(color.Output, d)
@@ -221,7 +277,7 @@ func completeHistoryOutput(domains []string, enums []string, ea, la []time.Time,
 		if !updates {
 			g.Println("No differences discovered")
 		}
-		prev = enum
+		prev = uuid
 	}
 }
 
@@ -232,50 +288,44 @@ func blueLine() {
 	fmt.Println()
 }
 
-func diffEnumOutput(out1, out2 []*core.Output) []string {
-	omap1 := make(map[string]*core.Output)
-	omap2 := make(map[string]*core.Output)
+func diffEnumOutput(older, newer []*requests.Output) []string {
+	oldmap := make(map[string]*requests.Output)
+	newmap := make(map[string]*requests.Output)
 
-	for _, o := range out1 {
-		omap1[o.Name] = o
+	for _, o := range older {
+		oldmap[o.Name] = o
 	}
-	for _, o := range out2 {
-		omap2[o.Name] = o
+	for _, o := range newer {
+		newmap[o.Name] = o
 	}
 
-	handled := make(map[string]struct{})
 	var diff []string
-	for _, o := range out1 {
-		handled[o.Name] = struct{}{}
-
-		if _, found := omap2[o.Name]; !found {
-			diff = append(diff, fmt.Sprintf("%s%s %s", blue("Removed: "),
-				green(o.Name), yellow(lineOfAddresses(o.Addresses))))
+	for name, o := range newmap {
+		o2, found := oldmap[name]
+		if !found {
+			diff = append(diff, fmt.Sprintf("%s%s %s", blue("Found: "),
+				green(name), yellow(lineOfAddresses(o.Addresses))))
 			continue
 		}
 
-		o2 := omap2[o.Name]
 		if !compareAddresses(o.Addresses, o2.Addresses) {
 			diff = append(diff, fmt.Sprintf("%s%s\n\t%s\t%s\n\t%s\t%s", blue("Moved: "),
-				green(o.Name), blue(" from "), yellow(lineOfAddresses(o.Addresses)),
-				blue(" to "), yellow(lineOfAddresses(o2.Addresses))))
+				green(name), blue(" from "), yellow(lineOfAddresses(o2.Addresses)),
+				blue(" to "), yellow(lineOfAddresses(o.Addresses))))
 		}
 	}
 
-	for _, o := range out2 {
-		if _, found := handled[o.Name]; found {
-			continue
-		}
-
-		if _, found := omap1[o.Name]; !found {
-			diff = append(diff, fmt.Sprintf("%s%s %s", blue("Found: "),
-				green(o.Name), yellow(lineOfAddresses(o.Addresses))))
+	for name, o := range oldmap {
+		if _, found := newmap[name]; !found {
+			diff = append(diff, fmt.Sprintf("%s%s %s", blue("Removed: "),
+				green(name), yellow(lineOfAddresses(o.Addresses))))
 		}
 	}
+
 	return diff
 }
 
-func lineOfAddresses(addrs []core.AddressInfo) string {
+func lineOfAddresses(addrs []requests.AddressInfo) string {
 	var line string
 
 	for i, addr := range addrs {
@@ -287,7 +337,7 @@ func lineOfAddresses(addrs []core.AddressInfo) string {
 	return line
 }
 
-func compareAddresses(addr1, addr2 []core.AddressInfo) bool {
+func compareAddresses(addr1, addr2 []requests.AddressInfo) bool {
 	for _, a1 := range addr1 {
 		var found bool
 

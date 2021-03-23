@@ -1,83 +1,54 @@
-# Golang CircleCI 2.0 configuration file
-#
-# Check https://circleci.com/docs/2.0/language-go/ for more details
-version: 2
+version: 2.1
+
+orbs:
+  codecov: codecov/codecov@1.1.3
+
 jobs:
   test:
     docker:
-      - image: circleci/golang:1.12.3
+      - image: circleci/golang:1.15
 
-    working_directory: /go/src/github.com/OWASP/Amass
-    steps:
-      - checkout
-      - run:
-          name: "Test Amass"
-          command: |
-            export GO111MODULE=on
-            cd amass
-            go test -v -race ./...
+    environment:
+      GO111MODULE: "on"
+      PROJECT_DIR: /go/src/github.com/OWASP/Amass
 
-  binaries:
-    docker:
-      - image: circleci/golang:1.12.3
+    working_directory: $PROJECT_DIR
 
-    working_directory: /go/src/github.com/OWASP/Amass
-    steps:
-      - checkout
-      - run:
-          name: "Build Amass Binaries"
-          command: |
-            curl -sL https://git.io/goreleaser | bash
-
-  buildsnap:
-    docker:
-      - image: snapcore/snapcraft:stable
-
-    working_directory: /go/src/github.com/OWASP/Amass
     steps:
       - checkout
 
       - run:
-          name: "Build Snap Package"
-          command: apt update && snapcraft
-      - persist_to_workspace:
-          root: .
-          paths:
-            - "*.snap"
-
-  pubsnap:
-    docker:
-      - image: snapcore/snapcraft:stable
-    steps:
-      - attach_workspace:
-          at: .
-      - run:
-          name: "Publish to Snap Store"
+          name: Setup Code Climate test-reporter
           command: |
-            mkdir .snapcraft
-            echo $SNAPCRAFT_LOGIN_FILE | base64 --decode --ignore-garbage > .snapcraft/snapcraft.cfg
-            snapcraft push *.snap --release edge
+            curl -L https://codeclimate.com/downloads/test-reporter/test-reporter-latest-linux-amd64 > /go/cc-test-reporter
+            chmod +x /go/cc-test-reporter
+
+      - run:
+          name: "Amass Unit Tests and Coverage Reports"
+          command: |
+            cd /go
+            go get github.com/OWASP/Amass/v3/...
+            cd $PROJECT_DIR
+            git checkout $CIRCLE_BRANCH
+            git pull origin $CIRCLE_BRANCH
+            /go/cc-test-reporter before-build
+            go test -coverprofile=c.out -covermode=atomic ./...
+            export PREFIX=$(basename $(go list -m))
+            /go/cc-test-reporter after-build -r $CODE_CLIMATE_TOKEN -t gocov -p $PREFIX --exit-code $?
+            go tool cover -html=c.out -o coverage.html
+            mv coverage.html /tmp/artifacts
+            mv c.out /tmp/artifacts
+
+      - codecov/upload:
+          file: /tmp/artifacts/c.out
+
+      - run:
+          name: Remove Code Climate test-reporter
+          command: |
+            rm /go/cc-test-reporter
 
 workflows:
-  version: 2
+  version: 2.1
   main:
     jobs:
       - test
-      - binaries:
-          requires:
-            - test
-          filters:
-            branches:
-              only: master
-      - buildsnap:
-          requires:
-            - test
-          filters:
-            branches:
-              only: master
-      - pubsnap:
-          requires:
-            - buildsnap
-          filters:
-            branches:
-              only: master

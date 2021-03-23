@@ -1,7 +1,6 @@
+# [![OWASP Logo](../images/owasp_logo.png) OWASP Amass](https://owasp.org/www-project-amass/) - Users' Guide
 
-# [![OWASP Logo](https://github.com/OWASP/Amass/blob/master/images/owasp_logo.png) OWASP Amass](https://www.owasp.org/index.php/OWASP_Amass_Project) - User's Guide
-
-![Network graph](https://github.com/OWASP/Amass/blob/master/images/network_06092018.png "Amass Network Mapping")
+![Network graph](../images/network_06092018.png "Amass Network Mapping")
 
 ----
 
@@ -28,11 +27,19 @@ amass enum -d example.com
 Typical parameters for DNS enumeration:
 
 ```bash
-$ amass enum -src -brute -min-for-recursive 1 -d example.com
+$ amass enum -v -src -ip -brute -min-for-recursive 2 -d example.com
 [Google] www.example.com
 [VirusTotal] ns.example.com
 ...
 ```
+
+Executing the tool via the Docker image:
+
+```bash
+docker run -v OUTPUT_DIR_PATH:/.config/amass/ caffix/amass:latest enum --list
+```
+
+The volume argument allows the Amass graph database to persist between executions and output files to be accessed on the host system. The first field (left of the colon) of the volume option is the amass output directory that is external to Docker, while the second field is the path, internal to Docker, where amass will write the output files.
 
 ## Command-line Usage Information
 
@@ -46,22 +53,43 @@ The amass tool has several subcommands shown below for handling your Internet ex
 | track | Compare results of enumerations against common target organizations |
 | db | Manage the graph databases storing the enumeration results |
 
-Each subcommand has its own arguments that shown in the following sections.
+Each subcommand has its own arguments that are shown in the following sections.
 
 ### The 'intel' Subcommand
 
 The intel subcommand can help you discover additional root domain names associated with the organization you are investigating. The data source sections of the configuration file are utilized by this subcommand in order to obtain passive intelligence, such as reverse whois information.
 
-**Caution:** If you use the intel subcommand, it will attempt to reach out to every IP address within the identified infrastructure and obtain additional domain names from reverse DNS requests and TLS certificates. This is "loud" and can reveal your reconnaissance activities to the organization being investigated, as well as expand the scope of your enumeration.
-
 | Flag | Description | Example |
 |------|-------------|---------|
+| -active | Enable active recon methods | amass intel -active -addr 192.168.2.1-64 -p 80,443,8080 |
 | -addr | IPs and ranges (192.168.1.1-254) separated by commas | amass intel -addr 192.168.2.1-64 |
 | -asn | ASNs separated by commas (can be used multiple times) | amass intel -asn 13374,14618 |
 | -cidr | CIDRs separated by commas (can be used multiple times) | amass intel -cidr 104.154.0.0/15 |
+| -config | Path to the INI configuration file | amass intel -config config.ini |
+| -d | Domain names separated by commas (can be used multiple times) | amass intel -whois -d example.com |
+| -demo | Censor output to make it suitable for demonstrations | amass intel -demo -whois -d example.com |
+| -df | Path to a file providing root domain names | amass intel -whois -df domains.txt |
+| -dir | Path to the directory containing the graph database | amass intel -dir PATH -cidr 104.154.0.0/15 |
+| -ef | Path to a file providing data sources to exclude | amass intel -whois -ef exclude.txt -d example.com |
+| -exclude | Data source names separated by commas to be excluded | amass intel -whois -exclude crtsh -d example.com |
+| -if | Path to a file providing data sources to include | amass intel -whois -if include.txt -d example.com |
+| -include | Data source names separated by commas to be included | amass intel -whois -include crtsh -d example.com |
+| -ip | Show the IP addresses for discovered names | amass intel -ip -whois -d example.com |
+| -ipv4 | Show the IPv4 addresses for discovered names | amass intel -ipv4 -whois -d example.com |
+| -ipv6 | Show the IPv6 addresses for discovered names | amass intel -ipv6 -whois -d example.com |
+| -list | Print the names of all available data sources | amass intel -list |
+| -log | Path to the log file where errors will be written | amass intel -log amass.log -whois -d example.com |
+| -max-dns-queries | Maximum number of concurrent DNS queries | amass intel -max-dns-queries 200 -whois -d example.com |
+| -noresolvrate | Disable resolver rate monitoring | amass intel -cidr 104.154.0.0/15 -noresolvrate |
+| -noresolvscore | Disable resolver reliability scoring | amass intel -cidr 104.154.0.0/15 -noresolvscore |
+| -o | Path to the text output file | amass intel -o out.txt -whois -d example.com |
 | -org | Search string provided against AS description information | amass intel -org Facebook |
-| -p | Ports separated by commas (default: 443) | amass intel -cidr 104.154.0.0/15 -p 443,8080 |
-| -whois | All discovered domains are run through reverse whois | amass intel -whois -asn 13374 |
+| -p | Ports separated by commas (default: 80, 443) | amass intel -cidr 104.154.0.0/15 -p 443,8080 |
+| -r | IP addresses of preferred DNS resolvers (can be used multiple times) | amass intel -r 8.8.8.8,1.1.1.1 -whois -d example.com |
+| -rf | Path to a file providing preferred DNS resolvers | amass intel -rf data/resolvers.txt -whois -d example.com |
+| -src | Print data sources for the discovered names | amass intel -src -whois -d example.com |
+| -timeout | Number of minutes to execute the enumeration | amass intel -timeout 30 -d example.com |
+| -whois | All discovered domains are run through reverse whois | amass intel -whois -d example.com |
 
 ### The 'enum' Subcommand
 
@@ -69,7 +97,7 @@ This subcommand will perform DNS enumeration and network mapping while populatin
 
 | Flag | Description | Example |
 |------|-------------|---------|
-| -active | Enable active recon methods | amass enum -active -d example.com net -p 80,443,8080 |
+| -active | Enable active recon methods | amass enum -active -d example.com -p 80,443,8080 |
 | -aw | Path to a different wordlist file for alterations | amass enum -aw PATH -d example.com |
 | -bl | Blacklist of subdomain names that will not be investigated | amass enum -bl blah.example.com -d example.com |
 | -blf | Path to a file providing blacklisted subdomains | amass enum -blf data/blacklist.txt -d example.com |
@@ -78,12 +106,12 @@ This subcommand will perform DNS enumeration and network mapping while populatin
 | -d | Domain names separated by commas (can be used multiple times) | amass enum -d example.com |
 | -demo | Censor output to make it suitable for demonstrations | amass enum -demo -d example.com |
 | -df | Path to a file providing root domain names | amass enum -df domains.txt |
+| -dir | Path to the directory containing the graph database | amass enum -dir PATH -d example.com |
 | -do | Path to data operations output file | amass enum -do data.json -d example.com |
 | -ef | Path to a file providing data sources to exclude | amass enum -ef exclude.txt -d example.com |
 | -exclude | Data source names separated by commas to be excluded | amass enum -exclude crtsh -d example.com |
 | -if | Path to a file providing data sources to include | amass enum -if include.txt -d example.com |
 | -include | Data source names separated by commas to be included | amass enum -include crtsh -d example.com |
-| -include-unresolvable | Output DNS names that did not resolve | amass enum -include-unresolvable -d example.com |
 | -ip | Show the IP addresses for discovered names | amass enum -ip -d example.com |
 | -ipv4 | Show the IPv4 addresses for discovered names | amass enum -ipv4 -d example.com |
 | -ipv6 | Show the IPv6 addresses for discovered names | amass enum -ipv6 -d example.com |
@@ -91,38 +119,44 @@ This subcommand will perform DNS enumeration and network mapping while populatin
 | -list | Print the names of all available data sources | amass enum -list |
 | -log | Path to the log file where errors will be written | amass enum -log amass.log -d example.com |
 | -max-dns-queries | Maximum number of concurrent DNS queries | amass enum -max-dns-queries 200 -d example.com |
-| -min-for-recursive | Number of labels in a subdomain before recursive brute forcing | amass enum -brute -min-for-recursive 3 -d example.com |
-| -nf | Path to a file providing already known subdomain names | amass enum -nf names.txt -d example.com |
+| -min-for-recursive | Subdomain labels seen before recursive brute forcing (Default: 1) | amass enum -brute -min-for-recursive 3 -d example.com |
+| -nf | Path to a file providing already known subdomain names (from other tools/sources) | amass enum -nf names.txt -d example.com |
 | -noalts | Disable generation of altered names | amass enum -noalts -d example.com |
+| -nolocaldb | Disable saving data into a local database | amass enum -nolocaldb -d example.com |
 | -norecursive | Turn off recursive brute forcing | amass enum -brute -norecursive -d example.com |
+| -noresolvrate | Disable resolver rate monitoring | amass enum -d example.com -noresolvrate |
+| -noresolvscore | Disable resolver reliability scoring | amass enum -d example.com -noresolvscore |
 | -o | Path to the text output file | amass enum -o out.txt -d example.com |
 | -oA | Path prefix used for naming all output files | amass enum -oA amass_scan -d example.com |
 | -passive | A purely passive mode of execution | amass enum --passive -d example.com |
+| -p | Ports separated by commas (default: 443) | amass enum -d example.com -p 443,8080 |
 | -r | IP addresses of preferred DNS resolvers (can be used multiple times) | amass enum -r 8.8.8.8,1.1.1.1 -d example.com |
 | -rf | Path to a file providing preferred DNS resolvers | amass enum -rf data/resolvers.txt -d example.com |
 | -src | Print data sources for the discovered names | amass enum -src -d example.com |
+| -timeout | Number of minutes to execute the enumeration | amass enum -timeout 30 -d example.com |
 | -w | Path to a different wordlist file | amass enum -brute -w wordlist.txt -d example.com |
 
 ### The 'viz' Subcommand
 
 Create enlightening network graph visualizations that add structure to the information gathered. This subcommand only leverages the 'output_directory' and remote graph database settings from the configuration file.
 
+The files generated for visualization are created in the current working directory and named amass_TYPE
+
 Switches for outputting the DNS and infrastructure findings as a network graph:
 
 | Flag | Description | Example |
 |------|-------------|---------|
-| -config | Path to the INI configuration file | amass viz -config config.ini -d3 -o PATH |
-| -d | Domain names separated by commas (can be used multiple times) | amass viz -d3 -d example.com -o PATH |
-| -d3 | Output a D3.js v4 force simulation HTML file | amass viz -d3 -o PATH |
-| -df | Path to a file providing root domain names | amass viz -d3 -df domains.txt -o PATH |
-| -dir | Path to the directory containing the graph database | amass viz -d3 -dir PATH -o PATH |
-| -enum | Identify an enumeration via an index from the db listing | amass viz -enum 1 -d3 -o PATH |
-| -gexf | Output to Graph Exchange XML Format (GEXF) | amass viz -gephi -o PATH |
-| -graphistry | Output Graphistry JSON | amass viz -graphistry -o PATH |
-| -i | Path to the Amass data operations JSON input file | amass viz -d3 -o PATH |
-| -maltego | Output a Maltego Graph Table CSV file | amass viz -maltego -o PATH |
-| -o | Path to the directory to place the generated output file(s) | amass viz -d3 -o PATH |
-| -visjs | Output HTML that employs VisJS | amass viz -visjs -o PATH |
+| -config | Path to the INI configuration file | amass viz -config config.ini -d3 |
+| -d | Domain names separated by commas (can be used multiple times) | amass viz -d3 -d example.com |
+| -d3 | Output a D3.js v4 force simulation HTML file | amass viz -d3 -d example.com |
+| -df | Path to a file providing root domain names | amass viz -d3 -df domains.txt |
+| -dir | Path to the directory containing the graph database | amass viz -d3 -dir PATH -d example.com |
+| -enum | Identify an enumeration via an index from the db listing | amass viz -enum 1 -d3 -d example.com |
+| -gexf | Output to Graph Exchange XML Format (GEXF) | amass viz -gephi -d example.com |
+| -graphistry | Output Graphistry JSON | amass viz -graphistry -d example.com |
+| -i | Path to the Amass data operations JSON input file | amass viz -d3 -d example.com |
+| -maltego | Output a Maltego Graph Table CSV file | amass viz -maltego -d example.com |
+| -visjs | Output HTML that employs VisJS | amass viz -visjs -d example.com |
 
 ### The 'track' Subcommand
 
@@ -154,31 +188,57 @@ Performs viewing and manipulation of the graph database. This subcommand only le
 | -ip | Show the IP addresses for discovered names | amass db -show -ip -d example.com |
 | -ipv4 | Show the IPv4 addresses for discovered names | amass db -show -ipv4 -d example.com |
 | -ipv6 | Show the IPv6 addresses for discovered names | amass db -show -ipv6 -d example.com |
+| -json | Path to the JSON output file | amass db -names -silent -json out.json -d example.com |
 | -list | Print enumerations in the database and filter on domains specified | amass db -list |
+| -names | Print just discovered names | amass db -names -d example.com |
+| -nocolor | Disable colorized output | amass db -names -nocolor -d example.com |
+| -o | Path to the text output file | amass db -names -o out.txt -d example.com |
 | -show | Print the results for the enumeration index + domains provided | amass db -show |
+| -silent | Disable all output during execution | amass db -names -silent -json out.json -d example.com |
 | -src | Print data sources for the discovered names | amass db -show -src -d example.com |
+| -summary | Print just ASN table summary | amass db -summary -d example.com |
 
 ## The Output Directory
 
-Amass has several files that it outputs during an enumeration (e.g. the log file). If you are not using a database server to store the network graph information, then Amass creates one in the output directory. These files are used again during future enumerations, and when leveraging features like tracking and visualization.
+Amass has several files that it outputs during an enumeration (e.g. the log file). If you are not using a database server to store the network graph information, then Amass creates a file based graph database in the output directory. These files are used again during future enumerations, and when leveraging features like tracking and visualization.
 
-By default, the output directory is created in your **HOME** directory and named *amass*. If this is not suitable for your needs, then the subcommands can be instructed to create the output directory in an alternative location using the **'-dir'** flag.
+By default, the output directory is created in the operating system default root directory to use for user-specific configuration data and named *amass*. If this is not suitable for your needs, then the subcommands can be instructed to create the output directory in an alternative location using the **'-dir'** flag.
 
 If you decide to use an Amass configuration file, it will be automatically discovered when put in the output directory and named **config.ini**.
 
 ## The Configuration File
 
-You will need a config file to use your API keys with Amass. See the [Example Configuration File](https://github.com/OWASP/Amass/blob/master/examples/config.ini) for more details.
+You will need a config file to use your API keys with Amass. See the [Example Configuration File](../examples/config.ini) for more details.
+
+Amass automatically tries to discover the configuration file in the following locations:
+
+| Operating System | Path |
+| ---------------- | ---- |
+| Linux / Unix | `$XDG_CONFIG_HOME/amass/config.ini` or `$HOME/.config/amass/config.ini` |
+| Windows | `%AppData%\amass\config.ini` |
+| OSX | `$HOME/Library/Application Support/amass/config.ini` |
+
+These are good places for you to put your configuration file.
+
+Note that these locations are based on the [output directory](#the-output-directory). If you use the `-dir` flag, the location where Amass will try to discover the configuration file will change. For example, if you pass in `-dir ./my-out-dir`, Amass will try to discover a configuration file in `./my-out-dir/config.ini`.
 
 ### Default Section
 
 | Option | Description |
 |--------|-------------|
 | mode | Determines which mode the enumeration is performed in: default, passive or active |
-| port | Specifies a port to be used when actively pulling TLS certificates |
 | output_directory | The directory that stores the graph database and other output files |
 | maximum_dns_queries | The maximum number of concurrent DNS queries that can be performed |
 | include_unresolvable | When set to true, causes DNS names that did not resolve to be printed |
+
+### The network_settings Section
+
+| Option | Description |
+|--------|-------------|
+| address | IP address or range (e.g. a.b.c.10-245) that is in scope |
+| asn | ASN that is in scope |
+| cidr | CIDR (e.g. 192.168.1.0/24) that is in scope |
+| port | Specifies a port to be used when actively pulling TLS certificates |
 
 ### The domains Section
 
@@ -191,6 +251,8 @@ You will need a config file to use your API keys with Amass. See the [Example Co
 | Option | Description |
 |--------|-------------|
 | resolver | The IP address of a DNS resolver and used globally by the amass package |
+| score_resolvers | Toggle resolver reliability scoring |
+| monitor_resolver_rate | Toggle resolver rate monitoring |
 
 ### The blacklisted Section
 
@@ -236,7 +298,9 @@ You will need a config file to use your API keys with Amass. See the [Example Co
 
 ### Data Source Sections
 
-Each Amass data source service can have a dedicated configuration file section. This is how data sources can be configured that have authentication requirements.
+Each Amass data source service can have a dedicated configuration file section. The section is named just as in the output from the 'amass enum -list' command.
+
+This is how data sources can be configured that have authentication requirements.
 
 | Option | Description |
 |--------|-------------|
@@ -255,6 +319,14 @@ The results from each enumeration is stored separately in the graph database, wh
 
 There is nothing preventing multiple users from sharing a single (remote) graph database and leveraging each others findings across enumerations.
 
+### Cayley Graph Schema
+
+The GraphDB is storing all the domains that were found for a given enumeration. It stores the associated information such as the ip, ns_record, a_record, cname, ip block and associated source for each one of them as well. Each enumeration is identified by a uuid.
+
+Here is an example of graph for an enumeration run on example.com:
+
+![GraphDB](../images/example_graphDB.png)
+
 ## Importing OWASP Amass Results into Maltego
 
 1. Convert the Amass data into a Maltego graph table CSV file:
@@ -265,39 +337,62 @@ amass viz -maltego
 
 2. Import the CSV file with the correct Connectivity Table settings:
 
-![Connectivity table](https://github.com/OWASP/Amass/blob/master/images/maltego_graph_import_wizard.png "Connectivity Table Settings")
+![Connectivity table](../images/maltego_graph_import_wizard.png "Connectivity Table Settings")
 
 3. All the Amass findings will be brought into your Maltego Graph:
 
-![Maltego results](https://github.com/OWASP/Amass/blob/master/images/maltego_results.png "Maltego Results")
+![Maltego results](../images/maltego_results.png "Maltego Results")
 
 ## Integrating OWASP Amass into Your Work
 
 If you are using the amass package within your own Go code, be sure to properly seed the default pseudo-random number generator:
 
 ```go
-import(
-    "fmt"
-    "math/rand"
-    "time"
+package main
 
-    "github.com/OWASP/Amass/amass"
+import (
+	"fmt"
+	"math/rand"
+	"time"
+
+	"github.com/OWASP/Amass/v3/config"
+	"github.com/OWASP/Amass/v3/datasrcs"
+	"github.com/OWASP/Amass/v3/enum"
+	"github.com/OWASP/Amass/v3/systems"
 )
 
 func main() {
-    // Seed the default pseudo-random number generator
-    rand.Seed(time.Now().UTC().UnixNano())
+	// Seed the default pseudo-random number generator
+	rand.Seed(time.Now().UTC().UnixNano())
 
-    enum := amass.NewEnumeration()
-    // Setup the most basic amass configuration
-    enum.Config.AddDomain("example.com")
+	// Setup the most basic amass configuration
+	cfg := config.NewConfig()
+	cfg.AddDomain("example.com")
 
-    go func() {
-        for result := range enum.Output {
-            fmt.Println(result.Name)
-        }
-    }()
+	sys, err := systems.NewLocalSystem(cfg)
+	if err != nil {
+		return
+	}
+	sys.SetDataSources(datasrcs.GetAllSources(sys))
 
-    enum.Start()
+	e := enum.NewEnumeration(cfg, sys)
+	if e == nil {
+		return
+	}
+	defer e.Close()
+
+	e.Start()
+	for _, o := range e.ExtractOutput(nil) {
+		fmt.Println(o.Name)
+	}
 }
+```
+
+In case you get an error saying "Failed to create the graph", try changing the output directory in the config:
+
+```go
+cfg := config.NewConfig()
+cfg.Dir = "/tmp"
+
+sys, err := services.NewLocalSystem(cfg)
 ```

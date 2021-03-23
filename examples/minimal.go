@@ -1,24 +1,39 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"math/rand"
 	"time"
 
-	"github.com/OWASP/Amass/amass"
+	"github.com/OWASP/Amass/v3/config"
+	"github.com/OWASP/Amass/v3/datasrcs"
+	"github.com/OWASP/Amass/v3/enum"
+	"github.com/OWASP/Amass/v3/systems"
 )
 
 func main() {
 	// Seed the default pseudo-random number generator
 	rand.Seed(time.Now().UTC().UnixNano())
 
-	enum := amass.NewEnumeration()
-	go func() {
-		for result := range enum.Output {
-			fmt.Println(result.Name)
-		}
-	}()
 	// Setup the most basic amass configuration
-	enum.Config.AddDomain("example.com")
-	enum.Start()
+	cfg := config.NewConfig()
+	cfg.AddDomain("example.com")
+
+	sys, err := systems.NewLocalSystem(cfg)
+	if err != nil {
+		return
+	}
+	sys.SetDataSources(datasrcs.GetAllSources(sys))
+
+	e := enum.NewEnumeration(cfg, sys)
+	if e == nil {
+		return
+	}
+	defer e.Close()
+
+	e.Start(context.TODO())
+	for _, o := range e.ExtractOutput(nil, false) {
+		fmt.Println(o.Name)
+	}
 }

@@ -1,39 +1,38 @@
-// Copyright 2017 Jeff Foley. All rights reserved.
+// Copyright 2017-2021 Jeff Foley. All rights reserved.
 // Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 
 package main
 
 import (
 	"bytes"
-	"errors"
 	"flag"
-	"fmt"
 	"io/ioutil"
 	"math/rand"
 	"os"
 	"path/filepath"
 	"time"
 
-	"github.com/OWASP/Amass/amass/core"
-	"github.com/OWASP/Amass/amass/handlers"
-	"github.com/OWASP/Amass/amass/utils"
-	"github.com/OWASP/Amass/amass/utils/viz"
+	"github.com/OWASP/Amass/v3/config"
+	"github.com/OWASP/Amass/v3/viz"
+	"github.com/caffix/stringset"
 	"github.com/fatih/color"
 )
 
 const (
-	vizUsageMsg = "viz -d3|-gexf|-graphistry|-maltego|-visjs [options]"
+	vizUsageMsg = "viz -d3|-dot||-gexf|-graphistry|-maltego [options]"
 )
 
 type vizArgs struct {
-	Domains utils.ParseStrings
+	Domains stringset.Set
 	Enum    int
 	Options struct {
 		D3         bool
+		DOT        bool
 		GEXF       bool
 		Graphistry bool
 		Maltego    bool
-		VisJS      bool
+		NoColor    bool
+		Silent     bool
 	}
 	Filepaths struct {
 		ConfigFile string
@@ -47,7 +46,9 @@ type vizArgs struct {
 func runVizCommand(clArgs []string) {
 	var args vizArgs
 	var help1, help2 bool
-	vizCommand := flag.NewFlagSet("viz", flag.ExitOnError)
+	vizCommand := flag.NewFlagSet("viz", flag.ContinueOnError)
+
+	args.Domains = stringset.New()
 
 	vizBuf := new(bytes.Buffer)
 	vizCommand.SetOutput(vizBuf)
@@ -62,10 +63,12 @@ func runVizCommand(clArgs []string) {
 	vizCommand.StringVar(&args.Filepaths.Input, "i", "", "The Amass data operations JSON file")
 	vizCommand.StringVar(&args.Filepaths.Output, "o", "", "Path to the directory for output files being generated")
 	vizCommand.BoolVar(&args.Options.D3, "d3", false, "Generate the D3 v4 force simulation HTML file")
+	vizCommand.BoolVar(&args.Options.DOT, "dot", false, "Generate the DOT output file")
 	vizCommand.BoolVar(&args.Options.GEXF, "gexf", false, "Generate the Gephi Graph Exchange XML Format (GEXF) file")
 	vizCommand.BoolVar(&args.Options.Graphistry, "graphistry", false, "Generate the Graphistry JSON file")
 	vizCommand.BoolVar(&args.Options.Maltego, "maltego", false, "Generate the Maltego csv file")
-	vizCommand.BoolVar(&args.Options.VisJS, "visjs", false, "Generate the Visjs output HTML file")
+	vizCommand.BoolVar(&args.Options.NoColor, "nocolor", false, "Disable colorized output")
+	vizCommand.BoolVar(&args.Options.Silent, "silent", false, "Disable all output during execution")
 
 	if len(clArgs) < 1 {
 		commandUsage(vizUsageMsg, vizCommand, vizBuf)
@@ -81,184 +84,153 @@ func runVizCommand(clArgs []string) {
 		return
 	}
 
+	if args.Options.NoColor {
+		color.NoColor = true
+	}
+	if args.Options.Silent {
+		color.Output = ioutil.Discard
+		color.Error = ioutil.Discard
+	}
+
 	// Make sure at least one graph file format has been identified on the command-line
-	if !args.Options.D3 && !args.Options.GEXF &&
-		!args.Options.Graphistry && !args.Options.Maltego && !args.Options.VisJS {
+	if !args.Options.D3 && !args.Options.DOT &&
+		!args.Options.GEXF && !args.Options.Graphistry && !args.Options.Maltego {
 		r.Fprintln(color.Error, "At least one file format must be selected")
 		os.Exit(1)
 	}
 
 	if args.Filepaths.Domains != "" {
-		list, err := core.GetListFromFile(args.Filepaths.Domains)
+		list, err := config.GetListFromFile(args.Filepaths.Domains)
 		if err != nil {
 			r.Fprintf(color.Error, "Failed to parse the domain names file: %v\n", err)
 			return
 		}
-		args.Domains = utils.UniqueAppend(args.Domains, list...)
+		args.Domains.InsertMany(list...)
 	}
 
-	if args.Filepaths.Output == "" {
-		dir, err := os.Getwd()
-		if err != nil {
-			r.Fprintln(color.Error, "Failed to identify the output location")
-			os.Exit(1)
-		}
-		args.Filepaths.Output = dir
-	}
-	if finfo, err := os.Stat(args.Filepaths.Output); os.IsNotExist(err) || !finfo.IsDir() {
-		r.Fprintln(color.Error, "The output location does not exist or is not a directory")
-		os.Exit(1)
-	}
-
-	var err error
-	var uuid string
-	var db handlers.DataHandler
 	rand.Seed(time.Now().UTC().UnixNano())
 
-	// Obtain access to the graph database
-	if args.Filepaths.Input != "" {
-		uuid, db, err = inputFileToDB(&args)
-		args.Filepaths.Directory, err = ioutil.TempDir("", handlers.DefaultGraphDBDirectory)
-		if err == nil {
-			defer os.RemoveAll(args.Filepaths.Directory)
-			defer db.Close()
+	cfg := new(config.Config)
+	cfg.LocalDatabase = true
+	// Check if a configuration file was provided, and if so, load the settings
+	if err := config.AcquireConfig(args.Filepaths.Directory, args.Filepaths.ConfigFile, cfg); err == nil {
+		if args.Filepaths.Directory == "" {
+			args.Filepaths.Directory = config.OutputDirectory(cfg.Dir)
 		}
-	} else {
-		config := new(core.Config)
-		// Check if a configuration file was provided, and if so, load the settings
-		if acquireConfig(args.Filepaths.Directory, args.Filepaths.ConfigFile, config) {
-			if args.Filepaths.Directory == "" {
-				args.Filepaths.Directory = config.Dir
-			}
-			if len(args.Domains) == 0 {
-				args.Domains = utils.UniqueAppend(args.Domains, config.Domains()...)
-			}
+		if len(args.Domains) == 0 {
+			args.Domains.InsertMany(cfg.Domains()...)
 		}
-
-		db = openGraphDatabase(args.Filepaths.Directory, config)
-		if db == nil {
-			r.Fprintln(color.Error, "Failed to connect with the database")
-			os.Exit(1)
-		}
-		defer db.Close()
-
-		if args.Enum > 0 {
-			uuid = enumIndexToID(args.Enum, args.Domains, db)
-		} else {
-			// Get the UUID for the most recent enumeration
-			uuid = mostRecentEnumID(args.Domains, db)
-		}
-	}
-	if uuid == "" {
-		r.Fprintln(color.Error, "No enumeration found within the graph database")
+	} else if args.Filepaths.ConfigFile != "" {
+		r.Fprintf(color.Error, "Failed to load the configuration file: %v\n", err)
 		os.Exit(1)
 	}
 
-	nodes, edges := db.VizData(uuid)
+	db := openGraphDatabase(args.Filepaths.Directory, cfg)
+	if db == nil {
+		r.Fprintln(color.Error, "Failed to connect with the database")
+		os.Exit(1)
+	}
+	defer db.Close()
+
+	// Create the in-memory graph database
+	memDB, err := memGraphForScope(args.Domains.Slice(), db)
+	if err != nil {
+		r.Fprintln(color.Error, err.Error())
+		os.Exit(1)
+	}
+
+	// Get all the UUIDs for events that have information in scope
+	uuids := eventUUIDs(args.Domains.Slice(), memDB)
+	if len(uuids) == 0 {
+		r.Fprintln(color.Error, "Failed to find the domains of interest in the database")
+		os.Exit(1)
+	}
+
+	// Put the events in chronological order
+	uuids, _, _ = orderedEvents(uuids, memDB)
+	if len(uuids) == 0 {
+		r.Fprintln(color.Error, "Failed to sort the events")
+		os.Exit(1)
+	}
+
+	// Select the enumeration that the user specified
+	if args.Enum > 0 && len(uuids) > args.Enum {
+		uuids = []string{uuids[args.Enum]}
+	}
+
+	// Need to check if all the network infrastructure information is available
+	fgY.Fprintln(color.Error, "Could take a moment while acquiring AS network information")
+	// Migrate the changes back to the persistent db
+	if healASInfo(uuids, memDB) {
+		_ = memDB.MigrateEvents(db, uuids...)
+	}
+
+	// Obtain the visualization nodes & edges from the graph
+	nodes, edges := memDB.VizData(uuids)
+
+	// Get the directory to save the files into
+	dir := args.Filepaths.Directory
+	if args.Filepaths.Output != "" {
+		if finfo, err := os.Stat(args.Filepaths.Output); os.IsNotExist(err) || !finfo.IsDir() {
+			r.Fprintln(color.Error, "The output location does not exist or is not a directory")
+			os.Exit(1)
+		}
+
+		dir = args.Filepaths.Output
+	}
+
 	if args.Options.D3 {
-		dir := filepath.Join(args.Filepaths.Output, "amass_d3.html")
-		writeD3File(dir, nodes, edges)
+		path := filepath.Join(dir, "amass_d3.html")
+		err = writeGraphOutputFile("d3", path, nodes, edges)
+	}
+	if args.Options.DOT {
+		path := filepath.Join(dir, "amass.dot")
+		err = writeGraphOutputFile("dot", path, nodes, edges)
 	}
 	if args.Options.GEXF {
-		dir := filepath.Join(args.Filepaths.Output, "amass.gexf")
-		writeGEXFFile(dir, nodes, edges)
+		path := filepath.Join(dir, "amass.gexf")
+		err = writeGraphOutputFile("gexf", path, nodes, edges)
 	}
 	if args.Options.Graphistry {
-		dir := filepath.Join(args.Filepaths.Output, "amass_graphistry.gexf")
-		writeGraphistryFile(dir, nodes, edges)
+		path := filepath.Join(dir, "amass_graphistry.json")
+		err = writeGraphOutputFile("graphistry", path, nodes, edges)
 	}
 	if args.Options.Maltego {
-		dir := filepath.Join(args.Filepaths.Output, "amass_maltego.csv")
-		writeMaltegoFile(dir, nodes, edges)
+		path := filepath.Join(dir, "amass_maltego.csv")
+		err = writeGraphOutputFile("maltego", path, nodes, edges)
 	}
-	if args.Options.VisJS {
-		dir := filepath.Join(args.Filepaths.Output, "amass_visjs.html")
-		writeVisjsFile(dir, nodes, edges)
+
+	if err != nil {
+		r.Fprintf(color.Error, "Failed to write the output file: %v\n", err)
+		os.Exit(1)
 	}
 }
 
-func inputFileToDB(args *vizArgs) (string, handlers.DataHandler, error) {
-	var err error
-
-	args.Filepaths.Directory, err = ioutil.TempDir("", handlers.DefaultGraphDBDirectory)
-	if err != nil {
-		return "", nil, fmt.Errorf("Failed to open the temporary directory: %v", err)
-	}
-
-	f, err := os.Open(args.Filepaths.Input)
-	if err != nil {
-		return "", nil, fmt.Errorf("Failed to open the input file: %v", err)
-	}
-
-	opts, err := handlers.ParseDataOpts(f)
-	if err != nil {
-		return "", nil, fmt.Errorf("Failed to parse the provided data operations: %v", err)
-	}
-	uuid := opts[0].UUID
-
-	graph := handlers.NewGraph(args.Filepaths.Directory)
-	if graph == nil {
-		return "", nil, errors.New("Failed to create the temporary graph database")
-	}
-
-	err = handlers.DataOptsDriver(opts, graph)
-	if err != nil {
-		return "", nil, fmt.Errorf("Failed to build the network graph: %v", err)
-	}
-	return uuid, graph, nil
-}
-
-func writeMaltegoFile(path string, nodes []viz.Node, edges []viz.Edge) {
+func writeGraphOutputFile(t string, path string, nodes []viz.Node, edges []viz.Edge) error {
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0644)
 	if err != nil {
-		return
+		return err
 	}
-	defer f.Close()
+	defer func() {
+		_ = f.Sync()
+		_ = f.Close()
+	}()
 
-	viz.WriteMaltegoData(f, nodes, edges)
-	f.Sync()
-}
+	_ = f.Truncate(0)
+	_, _ = f.Seek(0, 0)
 
-func writeVisjsFile(path string, nodes []viz.Node, edges []viz.Edge) {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0644)
-	if err != nil {
-		return
+	switch t {
+	case "d3":
+		err = viz.WriteD3Data(f, nodes, edges)
+	case "dot":
+		err = viz.WriteDOTData(f, nodes, edges)
+	case "gexf":
+		err = viz.WriteGEXFData(f, nodes, edges)
+	case "graphistry":
+		err = viz.WriteGraphistryData(f, nodes, edges)
+	case "maltego":
+		viz.WriteMaltegoData(f, nodes, edges)
 	}
-	defer f.Close()
 
-	viz.WriteVisjsData(f, nodes, edges)
-	f.Sync()
-}
-
-func writeGraphistryFile(path string, nodes []viz.Node, edges []viz.Edge) {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0644)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-
-	viz.WriteGraphistryData(f, nodes, edges)
-	f.Sync()
-}
-
-func writeGEXFFile(path string, nodes []viz.Node, edges []viz.Edge) {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0644)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-
-	viz.WriteGEXFData(f, nodes, edges)
-	f.Sync()
-}
-
-func writeD3File(path string, nodes []viz.Node, edges []viz.Edge) {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE, 0644)
-	if err != nil {
-		return
-	}
-	defer f.Close()
-
-	viz.WriteD3Data(f, nodes, edges)
-	f.Sync()
+	return err
 }

@@ -1,10 +1,9 @@
-FROM golang:alpine as build
-WORKDIR /go/src/github.com/OWASP/Amass
-COPY . .
-RUN apk --no-cache add git \
-  && go get -u github.com/OWASP/Amass/...
+FROM golang:1.16-alpine as build
+RUN apk --no-cache add git
+RUN go get -v github.com/OWASP/Amass/v3/...
 
 FROM alpine:latest
+RUN apk --no-cache add ca-certificates
 COPY --from=build /go/bin/amass /bin/amass
-COPY --from=build /go/src/github.com/OWASP/Amass/wordlists /wordlists
+ENV HOME /
 ENTRYPOINT ["/bin/amass"]
