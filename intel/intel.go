@@ -1,4 +1,4 @@
-// Copyright 2017 Jeff Foley. All rights reserved.
+// Copyright 2017-2021 Jeff Foley. All rights reserved.
 // Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 
 package intel
@@ -13,17 +13,22 @@ import (
 
 	"github.com/OWASP/Amass/v3/config"
 	"github.com/OWASP/Amass/v3/datasrcs"
+	"github.com/OWASP/Amass/v3/filter"
 	amassnet "github.com/OWASP/Amass/v3/net"
 	"github.com/OWASP/Amass/v3/requests"
-	"github.com/OWASP/Amass/v3/resolvers"
-	"github.com/OWASP/Amass/v3/stringfilter"
 	"github.com/OWASP/Amass/v3/systems"
 	eb "github.com/caffix/eventbus"
 	"github.com/caffix/pipeline"
+	"github.com/caffix/resolve"
 	"github.com/caffix/service"
 	"github.com/caffix/stringset"
 	"github.com/miekg/dns"
 	"golang.org/x/net/publicsuffix"
+)
+
+const (
+	maxDnsPipelineTasks    int = 15000
+	maxActivePipelineTasks int = 25
 )
 
 // Collection is the object type used to execute a open source information gathering with Amass.
@@ -37,7 +42,7 @@ type Collection struct {
 	Output            chan *requests.Output
 	done              chan struct{}
 	doneAlreadyClosed bool
-	filter            stringfilter.Filter
+	filter            filter.Filter
 }
 
 // NewCollection returns an initialized Collection object that has not been started yet.
@@ -49,7 +54,7 @@ func NewCollection(cfg *config.Config, sys systems.System) *Collection {
 		srcs:   datasrcs.SelectedDataSources(cfg, sys.DataSources()),
 		Output: make(chan *requests.Output, 100),
 		done:   make(chan struct{}, 2),
-		filter: stringfilter.NewStringFilter(),
+		filter: filter.NewStringFilter(),
 	}
 }
 
@@ -86,10 +91,9 @@ func (c *Collection) HostedDomains(ctx context.Context) error {
 	}()
 
 	var stages []pipeline.Stage
-	max := c.Config.MaxDNSQueries * int(resolvers.QueryTimeout.Seconds())
-	stages = append(stages, pipeline.DynamicPool("", c.makeDNSTaskFunc(), max))
+	stages = append(stages, pipeline.DynamicPool("", c.makeDNSTaskFunc(), maxDnsPipelineTasks))
 	if c.Config.Active {
-		stages = append(stages, pipeline.FIFO("", newActiveTask(c, 100)))
+		stages = append(stages, pipeline.FIFO("", newActiveTask(c, maxActivePipelineTasks)))
 	}
 	stages = append(stages, pipeline.FIFO("filter", c.makeFilterTaskFunc()))
 
@@ -144,26 +148,26 @@ func (c *Collection) makeDNSTaskFunc() pipeline.TaskFunc {
 			return nil, nil
 		}
 
-		msg := resolvers.ReverseMsg(req.Address)
+		msg := resolve.ReverseMsg(req.Address)
 		if msg == nil {
 			return nil, nil
 		}
 
 		var nxdomain bool
 		addrinfo := requests.AddressInfo{Address: ip}
-		resp, err := c.Sys.Pool().Query(ctx, msg, resolvers.PriorityLow, func(times, priority int, m *dns.Msg) bool {
+		resp, err := c.Sys.Pool().Query(ctx, msg, resolve.PriorityLow, func(times, priority int, m *dns.Msg) bool {
 			// Try one more time if we receive NXDOMAIN
 			if m.Rcode == dns.RcodeNameError && !nxdomain {
 				nxdomain = true
 				return true
 			}
-			return resolvers.PoolRetryPolicy(times, priority, m)
+			return resolve.PoolRetryPolicy(times, priority, m)
 		})
 		if err == nil {
-			ans := resolvers.ExtractAnswers(resp)
+			ans := resolve.ExtractAnswers(resp)
 
 			if len(ans) > 0 {
-				d := strings.TrimSpace(resolvers.FirstProperSubdomain(c.ctx, c.Sys.Pool(), ans[0].Data, resolvers.PriorityHigh))
+				d := strings.TrimSpace(resolve.FirstProperSubdomain(c.ctx, c.Sys.Pool(), ans[0].Data, resolve.PriorityHigh))
 
 				if d != "" {
 					go pipeline.SendData(ctx, "filter", &requests.Output{
@@ -218,7 +222,7 @@ func (c *Collection) asnsToCIDRs() []*net.IPNet {
 		cidrSet.Union(req.Netblocks)
 	}
 
-	filter := stringfilter.NewStringFilter()
+	filter := filter.NewStringFilter()
 	// Do not return CIDRs that are already in the config
 	for _, cidr := range c.Config.CIDRs {
 		filter.Duplicate(cidr.String())
@@ -242,7 +246,7 @@ func (c *Collection) ReverseWhois() error {
 	}
 
 	ch := make(chan time.Time, 10)
-	filter := stringfilter.NewStringFilter()
+	filter := filter.NewStringFilter()
 	collect := func(req *requests.WhoisRequest) {
 		ch <- time.Now()
 

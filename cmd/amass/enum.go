@@ -1,4 +1,4 @@
-// Copyright 2017 Jeff Foley. All rights reserved.
+// Copyright 2017-2021 Jeff Foley. All rights reserved.
 // Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 
 package main
@@ -27,9 +27,9 @@ import (
 	"github.com/OWASP/Amass/v3/config"
 	"github.com/OWASP/Amass/v3/datasrcs"
 	"github.com/OWASP/Amass/v3/enum"
+	"github.com/OWASP/Amass/v3/filter"
 	"github.com/OWASP/Amass/v3/format"
 	"github.com/OWASP/Amass/v3/requests"
-	"github.com/OWASP/Amass/v3/stringfilter"
 	"github.com/OWASP/Amass/v3/systems"
 	"github.com/caffix/stringset"
 	"github.com/fatih/color"
@@ -57,22 +57,22 @@ type enumArgs struct {
 	Resolvers         stringset.Set
 	Timeout           int
 	Options           struct {
-		Active              bool
-		BruteForcing        bool
-		DemoMode            bool
-		IPs                 bool
-		IPv4                bool
-		IPv6                bool
-		ListSources         bool
-		MonitorResolverRate bool
-		NoAlts              bool
-		NoColor             bool
-		NoLocalDatabase     bool
-		NoRecursive         bool
-		Passive             bool
-		Silent              bool
-		Sources             bool
-		Verbose             bool
+		Active          bool
+		BruteForcing    bool
+		DemoMode        bool
+		IPs             bool
+		IPv4            bool
+		IPv6            bool
+		ListSources     bool
+		NoAlts          bool
+		NoColor         bool
+		NoLocalDatabase bool
+		NoRecursive     bool
+		Passive         bool
+		Share           bool
+		Silent          bool
+		Sources         bool
+		Verbose         bool
 	}
 	Filepaths struct {
 		AllFilePrefix    string
@@ -119,12 +119,12 @@ func defineEnumOptionFlags(enumFlags *flag.FlagSet, args *enumArgs) {
 	enumFlags.BoolVar(&args.Options.IPv4, "ipv4", false, "Show the IPv4 addresses for discovered names")
 	enumFlags.BoolVar(&args.Options.IPv6, "ipv6", false, "Show the IPv6 addresses for discovered names")
 	enumFlags.BoolVar(&args.Options.ListSources, "list", false, "Print the names of all available data sources")
-	enumFlags.BoolVar(&args.Options.MonitorResolverRate, "noresolvrate", true, "Disable resolver rate monitoring")
 	enumFlags.BoolVar(&args.Options.NoAlts, "noalts", false, "Disable generation of altered names")
 	enumFlags.BoolVar(&args.Options.NoColor, "nocolor", false, "Disable colorized output")
 	enumFlags.BoolVar(&args.Options.NoLocalDatabase, "nolocaldb", false, "Disable saving data into a local database")
 	enumFlags.BoolVar(&args.Options.NoRecursive, "norecursive", false, "Turn off recursive brute forcing")
 	enumFlags.BoolVar(&args.Options.Passive, "passive", false, "Disable DNS resolution of names and dependent features")
+	enumFlags.BoolVar(&args.Options.Share, "share", false, "Share findings with data source providers")
 	enumFlags.BoolVar(&args.Options.Silent, "silent", false, "Disable all output during execution")
 	enumFlags.BoolVar(&args.Options.Sources, "src", false, "Print data sources for the discovered names")
 	enumFlags.BoolVar(&args.Options.Verbose, "v", false, "Output status / debug / troubleshooting info")
@@ -178,7 +178,9 @@ func runEnumCommand(clArgs []string) {
 	}
 	defer func() { _ = sys.Shutdown() }()
 	sys.SetDataSources(datasrcs.GetAllSources(sys))
+
 	// Expand data source category names into the associated source names
+	initializeSourceTags(sys.DataSources())
 	cfg.SourceFilter.Sources = expandCategoryNames(cfg.SourceFilter.Sources, generateCategoryMap(sys))
 
 	// Setup the new enumeration
@@ -212,9 +214,6 @@ func runEnumCommand(clArgs []string) {
 	go saveJSONOutput(e, args, jsonOutChan, &wg)
 	outChans = append(outChans, jsonOutChan)
 
-	wg.Add(1)
-	go processOutput(e, outChans, done, &wg)
-
 	var ctx context.Context
 	var cancel context.CancelFunc
 	if args.Timeout == 0 {
@@ -223,6 +222,9 @@ func runEnumCommand(clArgs []string) {
 		ctx, cancel = context.WithTimeout(context.Background(), time.Duration(args.Timeout)*time.Minute)
 	}
 	defer cancel()
+
+	wg.Add(1)
+	go processOutput(ctx, e, outChans, done, &wg)
 
 	// Monitor for cancellation by the user
 	go func() {
@@ -242,11 +244,9 @@ func runEnumCommand(clArgs []string) {
 		r.Println(err)
 		os.Exit(1)
 	}
-	// Let all the goroutines know that the enumeration has finished
+	// Let all the output goroutines know that the enumeration has finished
 	close(done)
 	wg.Wait()
-
-	//e.Graph.DumpGraph()
 	// If necessary, handle graph database migration
 	if !cfg.Passive && len(e.Sys.GraphDatabases()) > 0 {
 		fmt.Fprintf(color.Error, "\n%s\n", green("The enumeration has finished"))
@@ -261,6 +261,10 @@ func runEnumCommand(clArgs []string) {
 					red("The database migration to "), red(g.String()), red(" failed: "), red(err.Error()))
 			}
 		}
+	}
+
+	if cfg.Share {
+		shareFindings(e, cfg)
 	}
 }
 
@@ -490,14 +494,20 @@ func saveJSONOutput(e *enum.Enumeration, args *enumArgs, output chan *requests.O
 	}
 }
 
-func processOutput(e *enum.Enumeration, outputs []chan *requests.Output, done chan struct{}, wg *sync.WaitGroup) {
+func processOutput(ctx context.Context, e *enum.Enumeration, outputs []chan *requests.Output, done chan struct{}, wg *sync.WaitGroup) {
 	defer wg.Done()
+	defer func() {
+		// Signal all the other output goroutines to terminate
+		for _, ch := range outputs {
+			close(ch)
+		}
+	}()
 
 	// This filter ensures that we only get new names
-	known := stringfilter.NewBloomFilter(1 << 22)
+	known := filter.NewBloomFilter(1 << 22)
 	// The function that obtains output from the enum and puts it on the channel
-	extract := func() {
-		for _, o := range e.ExtractOutput(known, true) {
+	extract := func(limit int) {
+		for _, o := range ExtractOutput(e, known, true, limit) {
 			if !e.Config.IsDomainInScope(o.Name) {
 				continue
 			}
@@ -508,30 +518,19 @@ func processOutput(e *enum.Enumeration, outputs []chan *requests.Output, done ch
 		}
 	}
 
-	t := time.NewTimer(15 * time.Second)
-loop:
+	t := time.NewTicker(5 * time.Second)
+	defer t.Stop()
 	for {
 		select {
+		case <-ctx.Done():
+			return
 		case <-done:
-			break loop
+			// Check one last time
+			extract(0)
+			return
 		case <-t.C:
-			started := time.Now()
-			extract()
-			next := time.Since(started) * 5
-			if next < 3*time.Second {
-				next = 3 * time.Second
-			} else if next > 10*time.Second {
-				next = 10 * time.Second
-			}
-			t.Reset(next)
+			extract(100)
 		}
-	}
-
-	// Check one last time
-	extract()
-	// Signal all the other goroutines to terminate
-	for _, ch := range outputs {
-		close(ch)
 	}
 }
 
@@ -664,6 +663,9 @@ func processEnumInputFiles(args *enumArgs) error {
 
 // Setup the amass enumeration settings
 func (e enumArgs) OverrideConfig(conf *config.Config) error {
+	if e.Options.Share {
+		conf.Share = true
+	}
 	if len(e.Addresses) > 0 {
 		conf.Addresses = e.Addresses
 	}
@@ -708,9 +710,13 @@ func (e enumArgs) OverrideConfig(conf *config.Config) error {
 	}
 	if e.Options.Active {
 		conf.Active = true
+		conf.Passive = false
 	}
 	if e.Options.Passive {
 		conf.Passive = true
+		conf.Active = false
+		conf.BruteForcing = false
+		conf.Alterations = false
 	}
 	if e.Blacklist.Len() > 0 {
 		conf.Blacklist = e.Blacklist.Slice()
@@ -723,9 +729,6 @@ func (e enumArgs) OverrideConfig(conf *config.Config) error {
 	}
 	if e.MaxDNSQueries > 0 {
 		conf.MaxDNSQueries = e.MaxDNSQueries
-	}
-	if !e.Options.MonitorResolverRate {
-		conf.MonitorResolverRate = false
 	}
 
 	if len(e.Included) > 0 {

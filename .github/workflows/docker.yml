@@ -4,6 +4,9 @@ on:
   push:
     tags:
       - 'v*.*.*'
+  pull_request:
+    branches:
+      - "develop"
 
 jobs:
   dockerhub-publish:
@@ -12,16 +15,22 @@ jobs:
       -
         name: Checkout
         uses: actions/checkout@v2
-      -
-        name: Docker meta
-        id: docker_meta
-        uses: crazy-max/ghaction-docker-meta@v1
+      - if: github.ref == 'refs/heads/master'
+        id: meta_master
+        uses: docker/metadata-action@v3
         with:
           images: caffix/amass
-          tag-semver: |
-            v{{major}}
-            v{{major}}.{{minor}}
-            v{{major}}.{{minor}}.{{patch}}
+          tags: |
+            type=semver,pattern=v{{major}}
+            type=semver,pattern=v{{major}}.{{minor}}
+            type=semver,pattern=v{{major}}.{{minor}}.{{patch}}
+      - if: github.ref == 'refs/heads/develop'
+        id: meta_develop
+        uses: docker/metadata-action@v3
+        with:
+          images: caffix/amass
+          tags: |
+            type=raw,value=dev
       -
         name: Set up QEMU
         uses: docker/setup-qemu-action@v1
@@ -46,5 +55,5 @@ jobs:
           builder: ${{ steps.buildx.outputs.name }}
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ${{ steps.docker_meta.outputs.tags }}
-          labels: ${{ steps.docker_meta.outputs.labels }}
+          tags: '${{ steps.meta_master.outputs.tags }}${{ steps.meta_develop.outputs.tags }}'
+          labels: '${{ steps.meta_master.outputs.labels }}${{ steps.meta_develop.outputs.labels }}'

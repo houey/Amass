@@ -21,7 +21,6 @@ import (
 	"sync"
 
 	_ "github.com/OWASP/Amass/v3/config/statik" // The content being embedded into the binary
-	"github.com/OWASP/Amass/v3/wordlist"
 	"github.com/caffix/stringset"
 	"github.com/go-ini/ini"
 	"github.com/google/uuid"
@@ -56,6 +55,9 @@ type Config struct {
 
 	// Logger for error messages
 	Log *log.Logger
+
+	// Share activates the process that shares findings with providers for service credits
+	Share bool `ini:"share"`
 
 	// The directory that stores the bolt db and other files created
 	Dir string `ini:"output_directory"`
@@ -116,7 +118,8 @@ type Config struct {
 	Active bool
 
 	// A blacklist of subdomain names that will not be investigated
-	Blacklist []string
+	Blacklist     []string
+	blacklistLock sync.Mutex
 
 	// A list of data sources that should not be utilized
 	SourceFilter struct {
@@ -131,8 +134,7 @@ type Config struct {
 	RecordTypes []string
 
 	// Resolver settings
-	Resolvers           []string
-	MonitorResolverRate bool
+	Resolvers []string
 
 	// Option for verbose logging and output
 	Verbose bool
@@ -150,12 +152,11 @@ type Config struct {
 // NewConfig returns a default configuration object.
 func NewConfig() *Config {
 	c := &Config{
-		UUID:                uuid.New(),
-		Log:                 log.New(ioutil.Discard, "", 0),
-		Ports:               []int{80, 443},
-		MinForRecursive:     1,
-		MonitorResolverRate: true,
-		LocalDatabase:       true,
+		UUID:            uuid.New(),
+		Log:             log.New(ioutil.Discard, "", 0),
+		Ports:           []int{80, 443},
+		MinForRecursive: 1,
+		LocalDatabase:   true,
 		// The following is enum-only, but intel will just ignore them anyway
 		Alterations:    true,
 		FlipWords:      true,
@@ -203,12 +204,12 @@ func (c *Config) CheckSettings() error {
 		}
 	}
 
-	c.Wordlist, err = wordlist.ExpandMaskWordlist(c.Wordlist)
+	c.Wordlist, err = ExpandMaskWordlist(c.Wordlist)
 	if err != nil {
 		return err
 	}
 
-	c.AltWordlist, err = wordlist.ExpandMaskWordlist(c.AltWordlist)
+	c.AltWordlist, err = ExpandMaskWordlist(c.AltWordlist)
 	if err != nil {
 		return err
 	}

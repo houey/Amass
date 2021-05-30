@@ -1,4 +1,4 @@
-// Copyright 2017 Jeff Foley. All rights reserved.
+// Copyright 2017-2021 Jeff Foley. All rights reserved.
 // Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 
 package main
@@ -18,9 +18,9 @@ import (
 	"github.com/OWASP/Amass/v3/config"
 	"github.com/OWASP/Amass/v3/format"
 	"github.com/OWASP/Amass/v3/requests"
-	"github.com/OWASP/Amass/v3/resolvers"
 	"github.com/OWASP/Amass/v3/systems"
 	"github.com/caffix/eventbus"
+	"github.com/caffix/resolve"
 	"github.com/caffix/stringset"
 	"github.com/fatih/color"
 	"github.com/miekg/dns"
@@ -39,12 +39,11 @@ type dnsArgs struct {
 	Resolvers     stringset.Set
 	Timeout       int
 	Options       struct {
-		DemoMode            bool
-		IPs                 bool
-		IPv4                bool
-		IPv6                bool
-		MonitorResolverRate bool
-		Verbose             bool
+		DemoMode bool
+		IPs      bool
+		IPv4     bool
+		IPv6     bool
+		Verbose  bool
 	}
 	Filepaths struct {
 		AllFilePrefix string
@@ -74,7 +73,6 @@ func defineDNSOptionFlags(dnsFlags *flag.FlagSet, args *dnsArgs) {
 	dnsFlags.BoolVar(&args.Options.IPs, "ip", false, "Show the IP addresses for discovered names")
 	dnsFlags.BoolVar(&args.Options.IPv4, "ipv4", false, "Show the IPv4 addresses for discovered names")
 	dnsFlags.BoolVar(&args.Options.IPv6, "ipv6", false, "Show the IPv6 addresses for discovered names")
-	dnsFlags.BoolVar(&args.Options.MonitorResolverRate, "noresolvrate", true, "Disable resolver rate monitoring")
 	dnsFlags.BoolVar(&args.Options.Verbose, "v", false, "Output status / debug / troubleshooting info")
 }
 
@@ -209,14 +207,14 @@ func processDNSRequest(ctx context.Context, req *requests.DNSRequest,
 		return
 	}
 
-	req.Domain = resolvers.FirstProperSubdomain(ctx, sys.Pool(), req.Name, resolvers.PriorityHigh)
+	req.Domain = resolve.FirstProperSubdomain(ctx, sys.Pool(), req.Name, resolve.PriorityHigh)
 	if req.Domain == "" {
 		c <- nil
 		return
 	}
 
-	msg := resolvers.QueryMsg(req.Name, dns.TypeNone)
-	if cfg.Blacklisted(req.Name) || sys.Pool().WildcardType(ctx, msg, req.Domain) == resolvers.WildcardTypeDynamic {
+	msg := resolve.QueryMsg(req.Name, dns.TypeNone)
+	if cfg.Blacklisted(req.Name) || sys.Pool().WildcardType(ctx, msg, req.Domain) == resolve.WildcardTypeDynamic {
 		c <- nil
 		return
 	}
@@ -224,15 +222,15 @@ func processDNSRequest(ctx context.Context, req *requests.DNSRequest,
 	var answers []requests.DNSAnswer
 	for _, t := range cfg.RecordTypes {
 		qtype := nameToType(t)
-		msg := resolvers.QueryMsg(req.Name, qtype)
-		resp, err := sys.Pool().Query(ctx, msg, resolvers.PriorityLow, resolvers.RetryPolicy)
+		msg := resolve.QueryMsg(req.Name, qtype)
+		resp, err := sys.Pool().Query(ctx, msg, resolve.PriorityLow, resolve.RetryPolicy)
 		if err == nil {
-			ans := resolvers.ExtractAnswers(resp)
+			ans := resolve.ExtractAnswers(resp)
 			if len(ans) == 0 {
 				continue
 			}
 
-			rr := resolvers.AnswersByType(ans, qtype)
+			rr := resolve.AnswersByType(ans, qtype)
 			if len(rr) == 0 {
 				continue
 			}
@@ -248,7 +246,7 @@ func processDNSRequest(ctx context.Context, req *requests.DNSRequest,
 		if t == "CNAME" && len(resp.Answer) > 0 {
 			break
 		}
-		if sys.Pool().WildcardType(ctx, msg, req.Domain) != resolvers.WildcardTypeNone {
+		if sys.Pool().WildcardType(ctx, msg, req.Domain) != resolve.WildcardTypeNone {
 			return
 		}
 	}
@@ -304,7 +302,7 @@ loop:
 					pieces := strings.Split(rec.Data, ",")
 					rec.Data = pieces[len(pieces)-1]
 				}
-				rec.Data = resolvers.RemoveLastDot(rec.Data)
+				rec.Data = resolve.RemoveLastDot(rec.Data)
 
 				fmt.Fprintf(color.Output, "%s %s\t%s\n", green(name), blue(tstr), yellow(rec.Data))
 			}
@@ -389,9 +387,6 @@ func (d dnsArgs) OverrideConfig(conf *config.Config) error {
 	}
 	if d.MaxDNSQueries > 0 {
 		conf.MaxDNSQueries = d.MaxDNSQueries
-	}
-	if !d.Options.MonitorResolverRate {
-		conf.MonitorResolverRate = false
 	}
 
 	// Attempt to add the provided domains to the configuration
